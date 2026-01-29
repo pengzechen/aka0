@@ -9,6 +9,11 @@
 #include "motor.hpp"
 #include <unistd.h>
 
+// 控制宏定义
+#define ENABLE_DEBUG_OUTPUT 0      // 是否启用详细调试输出
+#define ENABLE_DRAW_BBOX 0         // 是否画框并保存图片
+#define ENABLE_SAVE_IMAGE 0        // 是否保存检测结果图片
+
 
 typedef struct {
   float x, y, w, h;
@@ -105,10 +110,12 @@ void correctYoloBoxes(std::vector<detection> &dets,
     int pad_top = (input_height - new_h) / 2;
     int pad_left = (input_width - new_w) / 2;
     
+#if ENABLE_DEBUG_OUTPUT
     printf("=== Coordinate correction ===\n");
     printf("Original image: %dx%d, Input size: %dx%d\n", image_w, image_h, input_width, input_height);
     printf("Scale: %.3f, New size: %dx%d, Padding: left=%d, top=%d\n", 
            scale, new_w, new_h, pad_left, pad_top);
+#endif
 
     for (int i = 0; i < det_num; ++i) {
         // YOLOv8输出的是中心点坐标(cx,cy)和宽高(w,h)
@@ -135,8 +142,10 @@ void correctYoloBoxes(std::vector<detection> &dets,
         dets[i].bbox.w = x2 - x1;           // 宽度
         dets[i].bbox.h = y2 - y1;           // 高度
         
+#if ENABLE_DEBUG_OUTPUT
         printf("Det[%d]: input_bbox(%.1f,%.1f,%.1f,%.1f) -> output_bbox(%.1f,%.1f,%.1f,%.1f)\n",
                i, cx, cy, w, h, dets[i].bbox.x, dets[i].bbox.y, dets[i].bbox.w, dets[i].bbox.h);
+#endif
     }
 }
 
@@ -154,10 +163,12 @@ int getDetections(CVI_TENSOR *output,
                   CVI_SHAPE output_shape,
                   float conf_thresh,
                   std::vector<detection> &dets) {
+#if ENABLE_DEBUG_OUTPUT
     // 添加调试信息：打印输出tensor信息
     printf("=== DEBUG: Output tensor information ===\n");
     printf("Output shape: [%d, %d, %d, %d]\n", 
            output_shape.dim[0], output_shape.dim[1], output_shape.dim[2], output_shape.dim[3]);
+#endif
     
     // 检查是否有足够的输出tensor
     if (output == nullptr) {
@@ -179,7 +190,9 @@ int getDetections(CVI_TENSOR *output,
     int channels = output_shape.dim[1]; // 应该是4(bbox) + 1(objectness) + classes_num
     int total_anchors = output_shape.dim[2]; // 27600
     
+#if ENABLE_DEBUG_OUTPUT
     printf("Batch: %d, Channels: %d, Total_anchors: %d\n", batch, channels, total_anchors);
+#endif
     
     // 计算每个stride层的anchor数量
     int anchor_counts[3];
@@ -187,7 +200,9 @@ int getDetections(CVI_TENSOR *output,
         int nh = input_height / stride[i];
         int nw = input_width / stride[i];
         anchor_counts[i] = nh * nw;
+#if ENABLE_DEBUG_OUTPUT
         printf("Stride[%d]: %f, grid: %dx%d, anchors: %d\n", i, stride[i], nh, nw, anchor_counts[i]);
+#endif
     }
     
     int anchor_offset = 0;
@@ -204,6 +219,7 @@ int getDetections(CVI_TENSOR *output,
                 // 获取objectness/confidence (第5个通道)
                 float objectness = output_ptr[4 * total_anchors + total_anchor_idx];
                 
+#if ENABLE_DEBUG_OUTPUT
                 // 添加调试输出：打印前几个anchor的原始数据
                 if (total_anchor_idx < 10 || objectness > 0.1) {
                     printf("Anchor[%d]: raw values = [%.6f, %.6f, %.6f, %.6f, %.6f]\n", 
@@ -214,6 +230,7 @@ int getDetections(CVI_TENSOR *output,
                            output_ptr[3 * total_anchors + total_anchor_idx],
                            output_ptr[4 * total_anchors + total_anchor_idx]);
                 }
+#endif
                 
                 if (objectness <= conf_thresh) {
                     continue;
@@ -237,8 +254,10 @@ int getDetections(CVI_TENSOR *output,
                 det.bbox.w = w;    // 宽度
                 det.bbox.h = h;    // 高度
                 
+#if ENABLE_DEBUG_OUTPUT
                 printf("Detection[%d]: conf=%.3f, bbox_center=(%.1f,%.1f), size=(%.1f,%.1f)\n", 
                        count, objectness, cx, cy, w, h);
+#endif
                 
                 count++;
                 dets.emplace_back(det);
@@ -259,37 +278,32 @@ void controlMotor(Motor &motor, float ball_x, float ball_y, int image_width, int
     float offset_y = ball_y - center_y;
     
     // 定义阈值
-    float x_threshold = image_width * 0.15f;  // 左右偏移阈值（15%图像宽度）
-    float y_threshold = image_height * 0.15f; // 前后偏移阈值（15%图像高度）
+    float x_threshold = image_width * 0.08f;  // 左右偏移阈值（8%图像宽度）
+    float y_threshold = image_height * 0.08f; // 前后偏移阈值（8%图像高度）
     
     int speed = 50; // 基础速度50%
-    
-    printf("Ball position: (%.1f, %.1f), Image center: (%.1f, %.1f)\n", 
-           ball_x, ball_y, center_x, center_y);
-    printf("Offset: x=%.1f (threshold=%.1f), y=%.1f (threshold=%.1f)\n", 
-           offset_x, x_threshold, offset_y, y_threshold);
     
     // 决策逻辑：优先处理左右偏移，然后处理前后距离
     if (fabs(offset_x) > x_threshold) {
         // 球偏左或偏右
         if (offset_x < 0) {
-            printf("Ball is on the LEFT, turning LEFT\n");
+            printf("[MOTOR] LEFT (ball_x=%.1f, offset=%.1f)\n", ball_x, offset_x);
             motor.left(speed);
         } else {
-            printf("Ball is on the RIGHT, turning RIGHT\n");
+            printf("[MOTOR] RIGHT (ball_x=%.1f, offset=%.1f)\n", ball_x, offset_x);
             motor.right(speed);
         }
     } else if (offset_y > y_threshold) {
         // 球在图像下方，表示距离近，后退
-        printf("Ball is CLOSE, moving BACKWARD\n");
+        printf("[MOTOR] BACKWARD (ball_y=%.1f, offset=%.1f)\n", ball_y, offset_y);
         motor.backward(speed);
     } else if (offset_y < -y_threshold) {
         // 球在图像上方，表示距离远，前进
-        printf("Ball is FAR, moving FORWARD\n");
+        printf("[MOTOR] FORWARD (ball_y=%.1f, offset=%.1f)\n", ball_y, offset_y);
         motor.forward(speed);
     } else {
         // 球在中心位置，停止
-        printf("Ball is CENTERED, STANDBY\n");
+        printf("[MOTOR] STANDBY (centered)\n");
         motor.standby();
     }
 }
@@ -361,15 +375,19 @@ int main(int argc, char **argv) {
   
   // 循环处理图片
   int image_idx = 0;
+  struct timeval start_time, end_time;
+  long total_time_us = 0;
+  int frame_count = 0;
+  
   while (true) {
+    gettimeofday(&start_time, NULL);
+    
     // 构建图片路径
     char image_path[256];
     sprintf(image_path, "/data/images/%d.jpg", (image_idx % num_images) + 1);
     image_idx++;
     
-    printf("\n========================================\n");
-    printf("Processing image: %s\n", image_path);
-    printf("========================================\n");
+    printf("\n[Frame %d] %s\n", image_idx, image_path);
     
     // imread
     cv::Mat image;
@@ -415,81 +433,85 @@ int main(int argc, char **argv) {
 
     // run inference
     CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
-    printf("CVI_NN_Forward Succeed...\n");
-    // do post proprocess
-    int det_num = 0;
-    std::vector<detection> dets;
-    
-    // 不再检查输出tensor数量，因为新版本支持单一输出tensor
-    printf("Processing single output tensor format...\n");
-    
-    det_num = getDetections(output, height, width, classes_num, output_shape[0],  
-                            conf_thresh, dets);
+  // do post proprocess
+  int det_num = 0;
+  std::vector<detection> dets;
+  
+  det_num = getDetections(output, height, width, classes_num, output_shape[0],  
+                          conf_thresh, dets);
     // correct box with origin image size
     NMS(dets, &det_num, iou_thresh);
     correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
 
     // 打印检测到的对象信息并控制电机
-    printf("=== Final Detection Results ===\n");
-    if (det_num > 0) {
-      // 选择置信度最高的球
-      int best_idx = 0;
-      float best_score = dets[0].score;
-      for (int i = 1; i < det_num; i++) {
-        if (dets[i].score > best_score) {
-          best_score = dets[i].score;
-          best_idx = i;
-        }
+  if (det_num > 0) {
+    // 选择置信度最高的球
+    int best_idx = 0;
+    float best_score = dets[0].score;
+    for (int i = 1; i < det_num; i++) {
+      if (dets[i].score > best_score) {
+        best_score = dets[i].score;
+        best_idx = i;
       }
-      
-      box b = dets[best_idx].bbox;
-      printf("Tracking ball[%d]: %s, score=%.3f, center=(%.1f, %.1f), size=(%.1f, %.1f)\n", 
-            best_idx, tennis_names[dets[best_idx].cls], dets[best_idx].score, 
-            b.x, b.y, b.w, b.h);
-      
-      // 根据球的位置控制电机
-      controlMotor(motor, b.x, b.y, cloned.cols, cloned.rows);
-    } else {
-      printf("No ball detected, STANDBY\n");
-      motor.standby();
     }
     
-    // draw bbox on image
-    for (int i = 0; i < det_num; i++) {
-      box b = dets[i].bbox;
-      // xywh2xyxy
-      int x1 = (b.x - b.w / 2);
-      int y1 = (b.y - b.h / 2);
-      int x2 = (b.x + b.w / 2);
-      int y2 = (b.y + b.h / 2);
-      
-      // 确保坐标在图像范围内
-      x1 = std::max(0, std::min(x1, cloned.cols - 1));
-      y1 = std::max(0, std::min(y1, cloned.rows - 1));
-      x2 = std::max(0, std::min(x2, cloned.cols - 1));
-      y2 = std::max(0, std::min(y2, cloned.rows - 1));
-      
-      printf("Drawing box[%d]: (x1=%d, y1=%d, x2=%d, y2=%d) on image size(%dx%d)\n", 
-            i, x1, y1, x2, y2, cloned.cols, cloned.rows);
-      
-      cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255),
-                    3, 8, 0);
-      char content[100];
-      sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
-      cv::putText(cloned, content, cv::Point(x1, y1 - 10),
-                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
-    }
-
-    // save picture with detection results
-    char output_path[256];
-    sprintf(output_path, "/data/images/detected_%d.jpg", image_idx);
-    cv::imwrite(output_path, cloned);
-    printf("Saved detection result to: %s\n", output_path);
-
-    printf("------\n");
-    printf("%d objects are detected\n", det_num);
-    printf("------\n");
+    box b = dets[best_idx].bbox;
+    printf("[DETECT] Ball found: pos(%.1f, %.1f), conf=%.3f\n", b.x, b.y, dets[best_idx].score);
     
+    // 根据球的位置控制电机
+    controlMotor(motor, b.x, b.y, cloned.cols, cloned.rows);
+  } else {
+    printf("[DETECT] No ball detected\n");
+    printf("[MOTOR] STANDBY\n");
+    motor.standby();
+  }
+  
+#if ENABLE_DRAW_BBOX
+  // draw bbox on image
+  for (int i = 0; i < det_num; i++) {
+    box b = dets[i].bbox;
+    // xywh2xyxy
+    int x1 = (b.x - b.w / 2);
+    int y1 = (b.y - b.h / 2);
+    int x2 = (b.x + b.w / 2);
+    int y2 = (b.y + b.h / 2);
+    
+    // 确保坐标在图像范围内
+    x1 = std::max(0, std::min(x1, cloned.cols - 1));
+    y1 = std::max(0, std::min(y1, cloned.rows - 1));
+    x2 = std::max(0, std::min(x2, cloned.cols - 1));
+    y2 = std::max(0, std::min(y2, cloned.rows - 1));
+    
+    cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255),
+                  3, 8, 0);
+    char content[100];
+    sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
+    cv::putText(cloned, content, cv::Point(x1, y1 - 10),
+                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+  }
+#endif
+
+#if ENABLE_SAVE_IMAGE
+  // save picture with detection results
+  char output_path[256];
+  sprintf(output_path, "/data/images/detected_%d.jpg", image_idx);
+  cv::imwrite(output_path, cloned);
+  printf("[SAVE] %s\n", output_path);
+#endif
+  
+  // 计算帧率
+  gettimeofday(&end_time, NULL);
+  long frame_time_us = (end_time.tv_sec - start_time.tv_sec) * 1000000 + 
+                       (end_time.tv_usec - start_time.tv_usec);
+  float fps = 1000000.0f / frame_time_us;
+  
+  frame_count++;
+  total_time_us += frame_time_us;
+  float avg_fps = 1000000.0f * frame_count / total_time_us;
+  
+  printf("[FPS] Current: %.2f, Average: %.2f (frame time: %.2f ms)\n", 
+         fps, avg_fps, frame_time_us / 1000.0f);
+  
     // 每处理完一张图片，休眠一段时间再处理下一张
     // usleep(500000); // 休眠0.5秒
   } // end while loop
