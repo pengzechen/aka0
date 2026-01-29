@@ -6,6 +6,8 @@
 #include <sys/time.h>
 #include <opencv2/opencv.hpp>
 #include "cviruntime.h"
+#include "motor.hpp"
+#include <unistd.h>
 
 
 typedef struct {
@@ -24,7 +26,9 @@ static const char *tennis_names[] = {
 
 static void usage(char **argv) {
   printf("Usage:\n");
-  printf("   %s cvimodel image.jpg image_detected.jpg\n", argv[0]);
+  printf("   %s cvimodel num_images\n", argv[0]);
+  printf("   Example: %s model.cvimodel 10\n", argv[0]);
+  printf("   This will process images 1.jpg to 10.jpg from /data/images/\n");
 }
 
 template <typename T>
@@ -246,14 +250,69 @@ int getDetections(CVI_TENSOR *output,
     return count;
 }
 
+// 根据球的位置控制小车移动
+void controlMotor(Motor &motor, float ball_x, float ball_y, int image_width, int image_height) {
+    // 计算球相对于图像中心的位置
+    float center_x = image_width / 2.0f;
+    float center_y = image_height / 2.0f;
+    float offset_x = ball_x - center_x;
+    float offset_y = ball_y - center_y;
+    
+    // 定义阈值
+    float x_threshold = image_width * 0.15f;  // 左右偏移阈值（15%图像宽度）
+    float y_threshold = image_height * 0.15f; // 前后偏移阈值（15%图像高度）
+    
+    int speed = 50; // 基础速度50%
+    
+    printf("Ball position: (%.1f, %.1f), Image center: (%.1f, %.1f)\n", 
+           ball_x, ball_y, center_x, center_y);
+    printf("Offset: x=%.1f (threshold=%.1f), y=%.1f (threshold=%.1f)\n", 
+           offset_x, x_threshold, offset_y, y_threshold);
+    
+    // 决策逻辑：优先处理左右偏移，然后处理前后距离
+    if (fabs(offset_x) > x_threshold) {
+        // 球偏左或偏右
+        if (offset_x < 0) {
+            printf("Ball is on the LEFT, turning LEFT\n");
+            motor.left(speed);
+        } else {
+            printf("Ball is on the RIGHT, turning RIGHT\n");
+            motor.right(speed);
+        }
+    } else if (offset_y > y_threshold) {
+        // 球在图像下方，表示距离近，后退
+        printf("Ball is CLOSE, moving BACKWARD\n");
+        motor.backward(speed);
+    } else if (offset_y < -y_threshold) {
+        // 球在图像上方，表示距离远，前进
+        printf("Ball is FAR, moving FORWARD\n");
+        motor.forward(speed);
+    } else {
+        // 球在中心位置，停止
+        printf("Ball is CENTERED, STANDBY\n");
+        motor.standby();
+    }
+}
+
 int main(int argc, char **argv) {
   int ret = 0;
   CVI_MODEL_HANDLE model;
 
-  if (argc != 4) {
+  if (argc != 3) {
     usage(argv);
     exit(-1);
   }
+  
+  int num_images = atoi(argv[2]);
+  if (num_images <= 0) {
+    printf("Error: num_images must be positive\n");
+    exit(-1);
+  }
+  
+  printf("Will process %d images from /data/images/\n", num_images);
+  
+  // 初始化电机
+  Motor motor;
   CVI_TENSOR *input;
   CVI_TENSOR *output;
   CVI_TENSOR *input_tensors;
@@ -299,102 +358,141 @@ int main(int argc, char **argv) {
   height = input_shape.dim[2];
   width = input_shape.dim[3];
   assert(height % 32 == 0 && width %32 == 0);
-  // imread
-  cv::Mat image;
-  image = cv::imread(argv[2]);
-  if (!image.data) {
-    printf("Could not open or find the image\n");
-    return -1;
-  }
-  cv::Mat cloned = image.clone();
-
-  // resize & letterbox
-  int ih = image.rows;
-  int iw = image.cols;
-  int oh = height;
-  int ow = width;
-  double resize_scale = std::min((double)oh / ih, (double)ow / iw);
-  int nh = (int)(ih * resize_scale);
-  int nw = (int)(iw * resize_scale);
-  cv::resize(image, image, cv::Size(nw, nh));
-  int top = (oh - nh) / 2;
-  int bottom = (oh - nh) - top;
-  int left = (ow - nw) / 2;
-  int right = (ow - nw) - left;
-  cv::copyMakeBorder(image, image, top, bottom, left, right, cv::BORDER_CONSTANT,
-                     cv::Scalar::all(0));
-  cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
-
-  //Packed2Planar
-  cv::Mat channels[3];
-  for (int i = 0; i < 3; i++) {
-    channels[i] = cv::Mat(image.rows, image.cols, CV_8SC1);
-  }
-  cv::split(image, channels);
-
-  // fill data
-  int8_t *ptr = (int8_t *)CVI_NN_TensorPtr(input);
-  int channel_size = height * width;
-  for (int i = 0; i < 3; ++i) {
-    memcpy(ptr + i * channel_size, channels[i].data, channel_size);
-  }
-
-  // run inference
-  CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
-  printf("CVI_NN_Forward Succeed...\n");
-  // do post proprocess
-  int det_num = 0;
-  std::vector<detection> dets;
   
-  // 不再检查输出tensor数量，因为新版本支持单一输出tensor
-  printf("Processing single output tensor format...\n");
-  
-  det_num = getDetections(output, height, width, classes_num, output_shape[0],  
-                          conf_thresh, dets);
-  // correct box with origin image size
-  NMS(dets, &det_num, iou_thresh);
-  correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
-
-  // draw bbox on image
-  for (int i = 0; i < det_num; i++) {
-    box b = dets[i].bbox;
-    // xywh2xyxy
-    int x1 = (b.x - b.w / 2);
-    int y1 = (b.y - b.h / 2);
-    int x2 = (b.x + b.w / 2);
-    int y2 = (b.y + b.h / 2);
+  // 循环处理图片
+  int image_idx = 0;
+  while (true) {
+    // 构建图片路径
+    char image_path[256];
+    sprintf(image_path, "/data/images/%d.jpg", (image_idx % num_images) + 1);
+    image_idx++;
     
-    // 确保坐标在图像范围内
-    x1 = std::max(0, std::min(x1, cloned.cols - 1));
-    y1 = std::max(0, std::min(y1, cloned.rows - 1));
-    x2 = std::max(0, std::min(x2, cloned.cols - 1));
-    y2 = std::max(0, std::min(y2, cloned.rows - 1));
+    printf("\n========================================\n");
+    printf("Processing image: %s\n", image_path);
+    printf("========================================\n");
     
-    printf("Drawing box[%d]: (x1=%d, y1=%d, x2=%d, y2=%d) on image size(%dx%d)\n", 
-           i, x1, y1, x2, y2, cloned.cols, cloned.rows);
+    // imread
+    cv::Mat image;
+    image = cv::imread(image_path);
+    if (!image.data) {
+      printf("Could not open or find the image: %s\n", image_path);
+      printf("Skipping to next image...\n");
+      usleep(500000); // 休眠0.5秒
+      continue;
+    }
+    cv::Mat cloned = image.clone();
+
+    // resize & letterbox
+    int ih = image.rows;
+    int iw = image.cols;
+    int oh = height;
+    int ow = width;
+    double resize_scale = std::min((double)oh / ih, (double)ow / iw);
+    int nh = (int)(ih * resize_scale);
+    int nw = (int)(iw * resize_scale);
+    cv::resize(image, image, cv::Size(nw, nh));
+    int top = (oh - nh) / 2;
+    int bottom = (oh - nh) - top;
+    int left = (ow - nw) / 2;
+    int right = (ow - nw) - left;
+    cv::copyMakeBorder(image, image, top, bottom, left, right, cv::BORDER_CONSTANT,
+                      cv::Scalar::all(0));
+    cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+
+    //Packed2Planar
+    cv::Mat channels[3];
+    for (int i = 0; i < 3; i++) {
+      channels[i] = cv::Mat(image.rows, image.cols, CV_8SC1);
+    }
+    cv::split(image, channels);
+
+    // fill data
+    int8_t *ptr = (int8_t *)CVI_NN_TensorPtr(input);
+    int channel_size = height * width;
+    for (int i = 0; i < 3; ++i) {
+      memcpy(ptr + i * channel_size, channels[i].data, channel_size);
+    }
+
+    // run inference
+    CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
+    printf("CVI_NN_Forward Succeed...\n");
+    // do post proprocess
+    int det_num = 0;
+    std::vector<detection> dets;
     
-    cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255),
-                  3, 8, 0);
-    char content[100];
-    sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
-    cv::putText(cloned, content, cv::Point(x1, y1 - 10),
-                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
-  }
-  
-  // 打印检测到的对象信息
-  printf("=== Final Detection Results ===\n");
-  for (int i = 0; i < det_num; i++) {
-    box b = dets[i].bbox;
-    printf("Object[%d]: %s, score=%.3f, bbox=(%.1f, %.1f, %.1f, %.1f)\n", 
-           i, tennis_names[dets[i].cls], dets[i].score, b.x, b.y, b.w, b.h);
-  }
+    // 不再检查输出tensor数量，因为新版本支持单一输出tensor
+    printf("Processing single output tensor format...\n");
+    
+    det_num = getDetections(output, height, width, classes_num, output_shape[0],  
+                            conf_thresh, dets);
+    // correct box with origin image size
+    NMS(dets, &det_num, iou_thresh);
+    correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
 
-  // save or show picture
-  cv::imwrite(argv[3], cloned);
+    // 打印检测到的对象信息并控制电机
+    printf("=== Final Detection Results ===\n");
+    if (det_num > 0) {
+      // 选择置信度最高的球
+      int best_idx = 0;
+      float best_score = dets[0].score;
+      for (int i = 1; i < det_num; i++) {
+        if (dets[i].score > best_score) {
+          best_score = dets[i].score;
+          best_idx = i;
+        }
+      }
+      
+      box b = dets[best_idx].bbox;
+      printf("Tracking ball[%d]: %s, score=%.3f, center=(%.1f, %.1f), size=(%.1f, %.1f)\n", 
+            best_idx, tennis_names[dets[best_idx].cls], dets[best_idx].score, 
+            b.x, b.y, b.w, b.h);
+      
+      // 根据球的位置控制电机
+      controlMotor(motor, b.x, b.y, cloned.cols, cloned.rows);
+    } else {
+      printf("No ball detected, STANDBY\n");
+      motor.standby();
+    }
+    
+    // draw bbox on image
+    for (int i = 0; i < det_num; i++) {
+      box b = dets[i].bbox;
+      // xywh2xyxy
+      int x1 = (b.x - b.w / 2);
+      int y1 = (b.y - b.h / 2);
+      int x2 = (b.x + b.w / 2);
+      int y2 = (b.y + b.h / 2);
+      
+      // 确保坐标在图像范围内
+      x1 = std::max(0, std::min(x1, cloned.cols - 1));
+      y1 = std::max(0, std::min(y1, cloned.rows - 1));
+      x2 = std::max(0, std::min(x2, cloned.cols - 1));
+      y2 = std::max(0, std::min(y2, cloned.rows - 1));
+      
+      printf("Drawing box[%d]: (x1=%d, y1=%d, x2=%d, y2=%d) on image size(%dx%d)\n", 
+            i, x1, y1, x2, y2, cloned.cols, cloned.rows);
+      
+      cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255),
+                    3, 8, 0);
+      char content[100];
+      sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
+      cv::putText(cloned, content, cv::Point(x1, y1 - 10),
+                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+    }
 
-  printf("------\n");
-  printf("%d objects are detected\n", det_num);
-  printf("------\n");
+    // save picture with detection results
+    char output_path[256];
+    sprintf(output_path, "/data/images/detected_%d.jpg", image_idx);
+    cv::imwrite(output_path, cloned);
+    printf("Saved detection result to: %s\n", output_path);
+
+    printf("------\n");
+    printf("%d objects are detected\n", det_num);
+    printf("------\n");
+    
+    // 每处理完一张图片，休眠一段时间再处理下一张
+    // usleep(500000); // 休眠0.5秒
+  } // end while loop
 
   CVI_NN_CleanupModel(model);
   printf("CVI_NN_CleanupModel succeeded\n");
