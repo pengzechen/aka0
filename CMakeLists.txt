@@ -18,6 +18,14 @@ endif()
 include_directories(${OPENCV_PATH}/include)
 link_directories(${OPENCV_PATH}/lib)
 
+# Add sensor include path
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include/isp/sg200x)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include/common)
+
+# Add sensor library path
+link_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/lib)
+
 set(CVI_LIBS ${CVI_LIBS} cviruntime cvikernel)
 if(NOT CMAKE_CROSSCOMPILING)
   set(CVI_LIBS ${CVI_LIBS} cvicmodel)
@@ -28,11 +36,16 @@ if(NOT CMAKE_CROSSCOMPILING)
   set(OPENCV_LIBS ${OPENCV_LIBS} opencv_highgui)
 endif()
 
-set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z)
+set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 
 add_executable(tennis tennis.cpp motor.cpp)
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}
+    -Wl,--start-group
+    sample isp isp_algo ae awb af
+    vpu cvi_ispd2 cvi_bin_isp cvi_bin
+    sns_full sys ini json-c
+    -Wl,--end-group
     ${EXTRA_LIBS})
 install(TARGETS tennis DESTINATION samples_extra/bin)
