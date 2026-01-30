@@ -1,0 +1,64 @@
+# clang-format configuration for tennis project
+# 
+# ⚠️  重要提示 / IMPORTANT:
+# 不要调整头文件的顺序！VI 相关头文件必须按特定顺序包含，否则会导致编译错误。
+# DO NOT reorder includes! VI-related headers must be included in specific order.
+#
+# 头文件顺序要求 / Include order requirements:
+# 1. 标准库头文件 (stdio.h, stdlib.h, etc.)
+# 2. 第三方库头文件 (opencv, cviruntime)
+# 3. linux/cvi_type.h 和 linux/cvi_common.h 等基础类型定义
+# 4. 其他 VI 相关头文件
+#
+
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# 禁用头文件自动排序 - 这是最重要的设置
+SortIncludes: Never
+
+# 基础格式设置
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# 大括号风格
+BreakBeforeBraces: Attach
+
+# 指针和引用对齐
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# 函数参数
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackParameters: true
+
+# 注释
+ReflowComments: false
+
+# 空格设置
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+
+# 其他
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+
+# 对齐
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: true
+AlignTrailingComments: true
+
+# 换行
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: false
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true

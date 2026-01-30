@@ -4,7 +4,7 @@
 #include <string>
 
 class Motor {
-public:
+  public:
     Motor();
     ~Motor();
 
@@ -15,7 +15,7 @@ public:
     void brake();
     void standby();
 
-private:
+  private:
     void set_pwm_duty_cycle(int pwm_id, int duty_cycle);
     void set_pwm_enable(int pwm_id, bool enable);
     void set_speed(int pwm_id, int speed);
@@ -32,4 +32,3 @@ private:
 };
 
 #endif // MOTOR_HPP
-

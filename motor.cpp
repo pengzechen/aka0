@@ -22,7 +22,7 @@ void Motor::init_pwm(int pwm_id) {
     }
 
     std::string pwm_channel_path = PWM_PATH + "pwm" + std::to_string(pwm_id);
-    
+
     std::ofstream ofs_period(pwm_channel_path + "/period");
     if (ofs_period.is_open()) {
         ofs_period << PERIOD;
@@ -49,8 +49,10 @@ void Motor::set_pwm_enable(int pwm_id, bool enable) {
 }
 
 void Motor::set_speed(int pwm_id, int speed) {
-    if (speed < 0) speed = 0;
-    if (speed > 100) speed = 100;
+    if (speed < 0)
+        speed = 0;
+    if (speed > 100)
+        speed = 100;
     int duty_cycle = (speed / 100.0) * PERIOD;
     set_pwm_duty_cycle(pwm_id, duty_cycle);
 }
