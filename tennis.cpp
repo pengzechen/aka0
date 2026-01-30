@@ -31,8 +31,8 @@
 
 // 控制宏定义
 #define ENABLE_DEBUG_OUTPUT 0 // 是否启用详细调试输出
-#define ENABLE_DRAW_BBOX 0    // 是否画框并保存图片
-#define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
+#define ENABLE_DRAW_BBOX 1    // 是否画框并保存图片
+#define ENABLE_SAVE_IMAGE 1   // 是否保存检测结果图片
 
 typedef struct {
     float x, y, w, h;
@@ -373,6 +373,22 @@ static int sys_vi_init(void) {
         return s32Ret;
     }
 
+    // Configure VI channel output to smaller resolution for better performance
+    VI_CHN_ATTR_S stChnAttr;
+    // Try to set channel 0 to 640x640
+    s32Ret = CVI_VI_GetChnAttr(0, 0, &stChnAttr);
+    if (s32Ret == CVI_SUCCESS) {
+        SAMPLE_PRT("Original VI output: %dx%d\n", stChnAttr.stSize.u32Width, stChnAttr.stSize.u32Height);
+        stChnAttr.stSize.u32Width = 640;
+        stChnAttr.stSize.u32Height = 640;
+        s32Ret = CVI_VI_SetChnAttr(0, 0, &stChnAttr);
+        if (s32Ret == CVI_SUCCESS) {
+            SAMPLE_PRT("VI output resized to: 640x640 for better performance\n");
+        } else {
+            SAMPLE_PRT("Failed to resize VI output: 0x%x (will use original size)\n", s32Ret);
+        }
+    }
+
     return CVI_SUCCESS;
 }
 
@@ -394,6 +410,12 @@ static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
 
         int width = stVideoFrame.stVFrame.u32Width;
         int height = stVideoFrame.stVFrame.u32Height;
+        
+        printf("[VI] Frame info: %dx%d, PixelFormat: %d, Length: Y=%u, U=%u, V=%u\n", 
+               width, height, stVideoFrame.stVFrame.enPixelFormat,
+               stVideoFrame.stVFrame.u32Length[0],
+               stVideoFrame.stVFrame.u32Length[1],
+               stVideoFrame.stVFrame.u32Length[2]);
 
         // Map physical memory to virtual address
         vir_addr = CVI_SYS_Mmap(stVideoFrame.stVFrame.u64PhyAddr[0], image_size);
@@ -408,11 +430,27 @@ static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
             }
         }
 
-        // Create YUV Mat (I420 format: Y plane + U plane + V plane)
-        cv::Mat yuv_i420(height * 3 / 2, width, CV_8UC1, vir_addr);
-
-        // Convert YUV420 to BGR
-        cv::cvtColor(yuv_i420, bgr_image, cv::COLOR_YUV2BGR_I420);
+        // Check pixel format and convert accordingly
+        // Format 19 = PIXEL_FORMAT_NV21 (YVU420 semi-planar)
+        // Format 18 = PIXEL_FORMAT_NV12 (YUV420 semi-planar)
+        // Format 13 = PIXEL_FORMAT_YUV_PLANAR_420 (I420)
+        if (stVideoFrame.stVFrame.enPixelFormat == 19) { // NV21
+            // NV21: Y plane + VU interleaved plane
+            cv::Mat yuv_nv21(height * 3 / 2, width, CV_8UC1, vir_addr);
+            cv::cvtColor(yuv_nv21, bgr_image, cv::COLOR_YUV2BGR_NV21);
+            printf("[VI] Got frame: %dx%d, format: NV21->BGR\n", width, height);
+        } else if (stVideoFrame.stVFrame.enPixelFormat == 18) { // NV12
+            cv::Mat yuv_nv12(height * 3 / 2, width, CV_8UC1, vir_addr);
+            cv::cvtColor(yuv_nv12, bgr_image, cv::COLOR_YUV2BGR_NV12);
+            printf("[VI] Got frame: %dx%d, format: NV12->BGR\n", width, height);
+        } else { // Default to I420
+            cv::Mat yuv_i420(height * 3 / 2, width, CV_8UC1, vir_addr);
+            cv::cvtColor(yuv_i420, bgr_image, cv::COLOR_YUV2BGR_I420);
+            printf("[VI] Got frame: %dx%d, format: I420->BGR\n", width, height);
+        }
+        
+        // Flip image 180 degrees (camera is upside down)
+        cv::flip(bgr_image, bgr_image, -1);
 
         CVI_SYS_Munmap(vir_addr, image_size);
 
@@ -534,6 +572,9 @@ int main(int argc, char** argv) {
         gettimeofday(&t2, NULL);
         long read_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
+        // Keep original for display later (will clone after resize)
+        cv::Mat original_bgr = image.clone();
+
         // resize & letterbox
         gettimeofday(&t1, NULL);
         int ih = image.rows;
@@ -600,43 +641,44 @@ int main(int argc, char** argv) {
 
             // 根据球的位置控制电机
             controlMotor(motor, b.x, b.y, cloned.cols, cloned.rows);
+            
+#if ENABLE_DRAW_BBOX
+            // draw bbox on image (only when ball detected)
+            for (int i = 0; i < det_num; i++) {
+                box b = dets[i].bbox;
+                // xywh2xyxy
+                int x1 = (b.x - b.w / 2);
+                int y1 = (b.y - b.h / 2);
+                int x2 = (b.x + b.w / 2);
+                int y2 = (b.y + b.h / 2);
+
+                // 确保坐标在图像范围内
+                x1 = std::max(0, std::min(x1, cloned.cols - 1));
+                y1 = std::max(0, std::min(y1, cloned.rows - 1));
+                x2 = std::max(0, std::min(x2, cloned.cols - 1));
+                y2 = std::max(0, std::min(y2, cloned.rows - 1));
+
+                cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255), 3, 8, 0);
+                char content[100];
+                sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
+                cv::putText(cloned, content, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255),
+                            2);
+            }
+#endif
+
+#if ENABLE_SAVE_IMAGE
+            // save picture with detection results (only when ball detected)
+            char output_path[256];
+            sprintf(output_path, "/boot/images/detected_%d.jpg", frame_idx);
+            printf("[DEBUG] Saving image: %dx%d, channels: %d\n", cloned.cols, cloned.rows, cloned.channels());
+            cv::imwrite(output_path, cloned);
+            printf("[SAVE] %s\n", output_path);
+#endif
         } else {
             printf("[DETECT] No ball detected\n");
             printf("[MOTOR] STANDBY\n");
             motor.standby();
         }
-
-#if ENABLE_DRAW_BBOX
-        // draw bbox on image
-        for (int i = 0; i < det_num; i++) {
-            box b = dets[i].bbox;
-            // xywh2xyxy
-            int x1 = (b.x - b.w / 2);
-            int y1 = (b.y - b.h / 2);
-            int x2 = (b.x + b.w / 2);
-            int y2 = (b.y + b.h / 2);
-
-            // 确保坐标在图像范围内
-            x1 = std::max(0, std::min(x1, cloned.cols - 1));
-            y1 = std::max(0, std::min(y1, cloned.rows - 1));
-            x2 = std::max(0, std::min(x2, cloned.cols - 1));
-            y2 = std::max(0, std::min(y2, cloned.rows - 1));
-
-            cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255), 3, 8, 0);
-            char content[100];
-            sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
-            cv::putText(cloned, content, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255),
-                        2);
-        }
-#endif
-
-#if ENABLE_SAVE_IMAGE
-        // save picture with detection results
-        char output_path[256];
-        sprintf(output_path, "/data/images/detected_%d.jpg", image_idx);
-        cv::imwrite(output_path, cloned);
-        printf("[SAVE] %s\n", output_path);
-#endif
 
         // 计算帧率
         gettimeofday(&end_time, NULL);
