@@ -376,8 +376,11 @@ int main(int argc, char **argv) {
   // 循环处理图片
   int image_idx = 0;
   struct timeval start_time, end_time;
+  struct timeval t1, t2;
   long total_time_us = 0;
   int frame_count = 0;
+
+  cv::setNumThreads(1);
   
   while (true) {
     gettimeofday(&start_time, NULL);
@@ -390,6 +393,7 @@ int main(int argc, char **argv) {
     printf("\n[Frame %d] %s\n", image_idx, image_path);
     
     // imread
+    gettimeofday(&t1, NULL);
     cv::Mat image;
     image = cv::imread(image_path);
     if (!image.data) {
@@ -399,8 +403,11 @@ int main(int argc, char **argv) {
       continue;
     }
     cv::Mat cloned = image.clone();
+    gettimeofday(&t2, NULL);
+    long read_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
     // resize & letterbox
+    gettimeofday(&t1, NULL);
     int ih = image.rows;
     int iw = image.cols;
     int oh = height;
@@ -430,19 +437,26 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 3; ++i) {
       memcpy(ptr + i * channel_size, channels[i].data, channel_size);
     }
+    gettimeofday(&t2, NULL);
+    long preprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
     // run inference
+    gettimeofday(&t1, NULL);
     CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
+    gettimeofday(&t2, NULL);
+    long inference_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
   // do post proprocess
+  gettimeofday(&t1, NULL);
   int det_num = 0;
   std::vector<detection> dets;
   
   det_num = getDetections(output, height, width, classes_num, output_shape[0],  
                           conf_thresh, dets);
-    // correct box with origin image size
-    NMS(dets, &det_num, iou_thresh);
-    correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
-
+  // correct box with origin image size
+  NMS(dets, &det_num, iou_thresh);
+  correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
+  gettimeofday(&t2, NULL);
+  long postprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
     // 打印检测到的对象信息并控制电机
   if (det_num > 0) {
     // 选择置信度最高的球
@@ -509,8 +523,11 @@ int main(int argc, char **argv) {
   total_time_us += frame_time_us;
   float avg_fps = 1000000.0f * frame_count / total_time_us;
   
-  printf("[FPS] Current: %.2f, Average: %.2f (frame time: %.2f ms)\n", 
+  printf("[FPS] Current: %.2f, Average: %.2f (total: %.2f ms)\n", 
          fps, avg_fps, frame_time_us / 1000.0f);
+  printf("[PROFILE] Read: %.2f ms, Preprocess: %.2f ms, Inference: %.2f ms, Postprocess: %.2f ms\n",
+         read_time / 1000.0f, preprocess_time / 1000.0f, 
+         inference_time / 1000.0f, postprocess_time / 1000.0f);
   
     // 每处理完一张图片，休眠一段时间再处理下一张
     // usleep(500000); // 休眠0.5秒

@@ -30,8 +30,7 @@ endif()
 
 set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z)
 
-add_executable(tennis
-    tennis.cpp)
+add_executable(tennis tennis.cpp motor.cpp)
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}

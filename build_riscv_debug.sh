@@ -33,4 +33,4 @@ cmake .. \
 make -j$(nproc)
 
 echo "Debug version compiled successfully!"
-echo "Executable: $(pwd)/cvi_sample_detector_yolov8n_fused_preprocess"
+echo "Executable: $(pwd)/tennis"
