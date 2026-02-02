@@ -27,12 +27,14 @@
 #include "cvi_awb.h"
 #include "cvi_isp.h"
 #include "cvi_sns_ctrl.h"
+#include "cvi_vpss.h"
 #include "sample_comm.h"
 
 // 控制宏定义
 #define ENABLE_DEBUG_OUTPUT 0 // 是否启用详细调试输出
 #define ENABLE_DRAW_BBOX 1    // 是否画框并保存图片
-#define ENABLE_SAVE_IMAGE 1   // 是否保存检测结果图片
+#define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
+#define USE_VPSS_RESIZE 1     // 使用VPSS硬件加速resize
 
 typedef struct {
     float x, y, w, h;
@@ -50,6 +52,13 @@ static const char* tennis_names[] = {"tennis"}; // 单类别网球检测
 // VI global variables
 static SAMPLE_VI_CONFIG_S g_stViConfig;
 static SAMPLE_INI_CFG_S g_stIniCfg;
+
+#if USE_VPSS_RESIZE
+// VPSS global variables for hardware resize
+static VPSS_GRP g_VpssGrp = 0;
+static VPSS_CHN g_VpssChn = 0;
+static bool g_bVpssInited = false;
+#endif
 
 static void usage(char** argv) {
     printf("Usage:\n");
@@ -382,6 +391,82 @@ static void sys_vi_deinit(void) {
     SAMPLE_COMM_SYS_Exit();
 }
 
+#if USE_VPSS_RESIZE
+// Initialize VPSS for hardware resize
+static int vpss_resize_init(int input_w, int input_h, int output_w, int output_h) {
+    CVI_S32 s32Ret;
+    VPSS_GRP_ATTR_S stVpssGrpAttr;
+    VPSS_CHN_ATTR_S stVpssChnAttr;
+    CVI_BOOL abChnEnable[VPSS_MAX_PHY_CHN_NUM] = {0};
+    
+    // Set group attribute
+    memset(&stVpssGrpAttr, 0, sizeof(VPSS_GRP_ATTR_S));
+    stVpssGrpAttr.stFrameRate.s32SrcFrameRate = -1;
+    stVpssGrpAttr.stFrameRate.s32DstFrameRate = -1;
+    stVpssGrpAttr.enPixelFormat = PIXEL_FORMAT_NV21;
+    stVpssGrpAttr.u32MaxW = input_w;
+    stVpssGrpAttr.u32MaxH = input_h;
+    stVpssGrpAttr.u8VpssDev = 0;
+    
+    // Create and start VPSS group
+    s32Ret = CVI_VPSS_CreateGrp(g_VpssGrp, &stVpssGrpAttr);
+    if (s32Ret != CVI_SUCCESS) {
+        printf("CVI_VPSS_CreateGrp failed: 0x%x\n", s32Ret);
+        return s32Ret;
+    }
+    
+    // Set channel attribute for resize output
+    memset(&stVpssChnAttr, 0, sizeof(VPSS_CHN_ATTR_S));
+    stVpssChnAttr.u32Width = output_w;
+    stVpssChnAttr.u32Height = output_h;
+    stVpssChnAttr.enVideoFormat = VIDEO_FORMAT_LINEAR;
+    stVpssChnAttr.enPixelFormat = PIXEL_FORMAT_NV21;
+    stVpssChnAttr.stFrameRate.s32SrcFrameRate = -1;
+    stVpssChnAttr.stFrameRate.s32DstFrameRate = -1;
+    stVpssChnAttr.u32Depth = 1;
+    stVpssChnAttr.bMirror = CVI_FALSE;
+    stVpssChnAttr.bFlip = CVI_FALSE;
+    stVpssChnAttr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
+    stVpssChnAttr.stNormalize.bEnable = CVI_FALSE;
+    
+    s32Ret = CVI_VPSS_SetChnAttr(g_VpssGrp, g_VpssChn, &stVpssChnAttr);
+    if (s32Ret != CVI_SUCCESS) {
+        printf("CVI_VPSS_SetChnAttr failed: 0x%x\n", s32Ret);
+        CVI_VPSS_DestroyGrp(g_VpssGrp);
+        return s32Ret;
+    }
+    
+    abChnEnable[g_VpssChn] = CVI_TRUE;
+    s32Ret = CVI_VPSS_EnableChn(g_VpssGrp, g_VpssChn);
+    if (s32Ret != CVI_SUCCESS) {
+        printf("CVI_VPSS_EnableChn failed: 0x%x\n", s32Ret);
+        CVI_VPSS_DestroyGrp(g_VpssGrp);
+        return s32Ret;
+    }
+    
+    s32Ret = CVI_VPSS_StartGrp(g_VpssGrp);
+    if (s32Ret != CVI_SUCCESS) {
+        printf("CVI_VPSS_StartGrp failed: 0x%x\n", s32Ret);
+        CVI_VPSS_DisableChn(g_VpssGrp, g_VpssChn);
+        CVI_VPSS_DestroyGrp(g_VpssGrp);
+        return s32Ret;
+    }
+    
+    g_bVpssInited = true;
+    printf("VPSS initialized: %dx%d -> %dx%d\n", input_w, input_h, output_w, output_h);
+    return CVI_SUCCESS;
+}
+
+static void vpss_resize_deinit(void) {
+    if (g_bVpssInited) {
+        CVI_VPSS_StopGrp(g_VpssGrp);
+        CVI_VPSS_DisableChn(g_VpssGrp, g_VpssChn);
+        CVI_VPSS_DestroyGrp(g_VpssGrp);
+        g_bVpssInited = false;
+    }
+}
+#endif
+
 // Get YUV frame from VI and convert to BGR
 static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
     VIDEO_FRAME_INFO_S stVideoFrame;
@@ -393,6 +478,89 @@ static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
         gettimeofday(&t2, NULL);
         get_frame_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
         
+#if USE_VPSS_RESIZE
+        // Use VPSS hardware to resize
+        gettimeofday(&t1, NULL);
+        
+        // Send frame to VPSS for hardware resize
+        CVI_S32 s32Ret = CVI_VPSS_SendFrame(g_VpssGrp, &stVideoFrame, -1);
+        if (s32Ret != CVI_SUCCESS) {
+            printf("CVI_VPSS_SendFrame failed: 0x%x\n", s32Ret);
+            CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+            return CVI_FAILURE;
+        }
+        
+        // Get resized frame from VPSS
+        VIDEO_FRAME_INFO_S stResizedFrame;
+        s32Ret = CVI_VPSS_GetChnFrame(g_VpssGrp, g_VpssChn, &stResizedFrame, 1000);
+        if (s32Ret != CVI_SUCCESS) {
+            printf("CVI_VPSS_GetChnFrame failed: 0x%x\n", s32Ret);
+            CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+            return CVI_FAILURE;
+        }
+        
+        gettimeofday(&t2, NULL);
+        resize_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        mmap_us = 0; // No separate mmap needed with VPSS
+        
+        // Get resized frame info
+        gettimeofday(&t1, NULL);
+        int width = stResizedFrame.stVFrame.u32Width;
+        int height = stResizedFrame.stVFrame.u32Height;
+        int stride_y = stResizedFrame.stVFrame.u32Stride[0];
+        int stride_uv = stResizedFrame.stVFrame.u32Stride[1];
+        
+        // Map resized frame memory - use full stride size
+        size_t y_size = stride_y * height;
+        size_t uv_size = stride_uv * height / 2;
+        size_t image_size = y_size + uv_size;
+        
+        CVI_VOID* vir_addr = CVI_SYS_Mmap(stResizedFrame.stVFrame.u64PhyAddr[0], image_size);
+        CVI_SYS_IonInvalidateCache(stResizedFrame.stVFrame.u64PhyAddr[0], vir_addr, image_size);
+        
+        // Always copy to contiguous memory for fast cvtColor
+        // Even if stride==width, VPSS output may not be cache-friendly
+        cv::Mat yuv_continuous(height * 3 / 2, width, CV_8UC1);
+        
+        if (stride_y == width && stride_uv == width) {
+            // Fast memcpy for entire buffer
+            memcpy(yuv_continuous.data, vir_addr, width * height * 3 / 2);
+        } else {
+            // Copy Y plane line by line
+            for (int i = 0; i < height; i++) {
+                memcpy(yuv_continuous.data + i * width, 
+                       (uint8_t*)vir_addr + i * stride_y, width);
+            }
+            // Copy UV plane line by line
+            for (int i = 0; i < height / 2; i++) {
+                memcpy(yuv_continuous.data + height * width + i * width,
+                       (uint8_t*)vir_addr + y_size + i * stride_uv, width);
+            }
+        }
+        
+        cv::cvtColor(yuv_continuous, bgr_image, cv::COLOR_YUV2BGR_NV21);
+        
+        gettimeofday(&t2, NULL);
+        cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        
+        printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (stride=%d)\n",
+               get_frame_us/1000.0, resize_us/1000.0, cvt_us/1000.0, stride_y);
+        
+        // Flip image 180 degrees
+        gettimeofday(&t1, NULL);
+        cv::flip(bgr_image, bgr_image, -1);
+        gettimeofday(&t2, NULL);
+        flip_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        
+        CVI_SYS_Munmap(vir_addr, image_size);
+        CVI_VPSS_ReleaseChnFrame(g_VpssGrp, g_VpssChn, &stResizedFrame);
+        CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+        
+        printf("[VI-DETAIL] Flip: %.1fms (VPSS mode)\n", flip_us/1000.0);
+        
+        return CVI_SUCCESS;
+#else
+        // Software resize path (original code)
         size_t image_size = stVideoFrame.stVFrame.u32Length[0] + stVideoFrame.stVFrame.u32Length[1] +
                             stVideoFrame.stVFrame.u32Length[2];
         CVI_VOID* vir_addr;
@@ -475,6 +643,7 @@ static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
                flip_us/1000.0, munmap_us/1000.0, release_us/1000.0);
 
         return CVI_SUCCESS;
+#endif  // USE_VPSS_RESIZE
     }
 
     CVI_TRACE_LOG(CVI_DBG_ERR, "CVI_VI_GetChnFrame NG\n");
@@ -507,6 +676,17 @@ int main(int argc, char** argv) {
 
     // Wait for sensor to stabilize
     usleep(500 * 1000);
+
+#if USE_VPSS_RESIZE
+    // Initialize VPSS for hardware resize (2560x1440 -> 640x640)
+    printf("Initializing VPSS for hardware resize...\n");
+    if (vpss_resize_init(2560, 1440, 640, 640) != CVI_SUCCESS) {
+        printf("Failed to initialize VPSS\n");
+        sys_vi_deinit();
+        exit(-1);
+    }
+    printf("VPSS initialized successfully\n");
+#endif
 
     // 初始化电机
     Motor motor;
@@ -698,10 +878,17 @@ int main(int argc, char** argv) {
 
         // 每处理完一张图片，休眠一段时间再处理下一张
         // usleep(500000); // 休眠0.5秒
+        if (frame_idx >= 200) {
+            // 处理200帧后退出
+            break;
+        }
     } // end while loop
 
     // Cleanup
     printf("\nCleaning up...\n");
+#if USE_VPSS_RESIZE
+    vpss_resize_deinit();
+#endif
     sys_vi_deinit();
     CVI_NN_CleanupModel(model);
     printf("CVI_NN_CleanupModel succeeded\n");
