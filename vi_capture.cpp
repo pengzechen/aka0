@@ -138,21 +138,33 @@ int VICapture::initVpssResize(int input_w, int input_h, int output_w, int output
     stVpssChnAttr.u32Width = output_w;
     stVpssChnAttr.u32Height = output_h;
     stVpssChnAttr.enVideoFormat = VIDEO_FORMAT_LINEAR;
+#if USE_VPSS_BGR
+    stVpssChnAttr.enPixelFormat = PIXEL_FORMAT_BGR_888;
+#else
     stVpssChnAttr.enPixelFormat = PIXEL_FORMAT_NV21;
+#endif
     stVpssChnAttr.stFrameRate.s32SrcFrameRate = -1;
     stVpssChnAttr.stFrameRate.s32DstFrameRate = -1;
     stVpssChnAttr.u32Depth = 1;
-    stVpssChnAttr.bMirror = CVI_FALSE;
-    stVpssChnAttr.bFlip = CVI_FALSE;
+    stVpssChnAttr.bMirror = CVI_TRUE;
+    stVpssChnAttr.bFlip = CVI_TRUE;
     stVpssChnAttr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
     stVpssChnAttr.stNormalize.bEnable = CVI_FALSE;
 
     s32Ret = CVI_VPSS_SetChnAttr(m_VpssGrp, m_VpssChn, &stVpssChnAttr);
     if (s32Ret != CVI_SUCCESS) {
-        LOGE("CVI_VPSS_SetChnAttr failed: 0x%x", s32Ret);
-        CVI_VPSS_DestroyGrp(m_VpssGrp);
-        return s32Ret;
+        LOGE("CVI_VPSS_SetChnAttr failed: 0x%x (Format: %d)", s32Ret, stVpssChnAttr.enPixelFormat);
+        // Fallback to NV21 if BGR is not supported (unlikely on this platform)
+        LOGW("VPSS BGR_888 not supported? Trying NV21...");
+        stVpssChnAttr.enPixelFormat = PIXEL_FORMAT_NV21;
+        s32Ret = CVI_VPSS_SetChnAttr(m_VpssGrp, m_VpssChn, &stVpssChnAttr);
+        if (s32Ret != CVI_SUCCESS) {
+             LOGE("CVI_VPSS_SetChnAttr fallback failed: 0x%x", s32Ret);
+             CVI_VPSS_DestroyGrp(m_VpssGrp);
+             return s32Ret;
+        }
     }
+
 
     abChnEnable[m_VpssChn] = CVI_TRUE;
     s32Ret = CVI_VPSS_EnableChn(m_VpssGrp, m_VpssChn);
@@ -171,7 +183,9 @@ int VICapture::initVpssResize(int input_w, int input_h, int output_w, int output
     }
 
     m_bVpssInited = true;
-    LOGI("VPSS initialized: %dx%d -> %dx%d", input_w, input_h, output_w, output_h);
+    LOGI("VPSS initialized: %dx%d -> %dx%d (PixelFormat=%s, Flip/Mirror enabled)", 
+         input_w, input_h, output_w, output_h, 
+         (stVpssChnAttr.enPixelFormat == PIXEL_FORMAT_BGR_888) ? "BGR_888" : "NV21");
     return CVI_SUCCESS;
 }
 
@@ -226,35 +240,66 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
 
         // Get resized frame info
         gettimeofday(&t1, NULL);
+
         int width = stResizedFrame.stVFrame.u32Width;
         int height = stResizedFrame.stVFrame.u32Height;
         int stride_y = stResizedFrame.stVFrame.u32Stride[0];
+        
+        // VPSS Hardware BGR Output Path (Default)
+        if (stResizedFrame.stVFrame.enPixelFormat == PIXEL_FORMAT_BGR_888) {
+             size_t image_size = stride_y * height;
+             // Use Cached Mmap for faster memory copy (vital for performance)
+             CVI_VOID* vir_addr = CVI_SYS_MmapCache(stResizedFrame.stVFrame.u64PhyAddr[0], image_size);
+             
+             // Invalidate cache to ensure we read fresh data from DRAM
+             CVI_SYS_IonInvalidateCache(stResizedFrame.stVFrame.u64PhyAddr[0], vir_addr, image_size);
+
+             if (bgr_image.empty() || bgr_image.rows != height || bgr_image.cols != width || bgr_image.type() != CV_8UC3) {
+                 bgr_image.create(height, width, CV_8UC3);
+             }
+
+             // Copy from specialized hardware memory to standard BGR Mat
+             if (stride_y == width * 3) {
+                 memcpy(bgr_image.data, vir_addr, image_size);
+             } else {
+                 for (int i = 0; i < height; i++) {
+                     memcpy(bgr_image.data + i * width * 3, (uint8_t*)vir_addr + i * stride_y, width * 3);
+                 }
+             }
+             
+             CVI_SYS_Munmap(vir_addr, image_size);
+             
+             gettimeofday(&t2, NULL);
+             cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+             printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)\n", 
+                    get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0);
+                    
+             CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);
+             CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
+             return CVI_SUCCESS;
+        }
+
+        // Fallback for NV21 if BGR failed
         int stride_uv = stResizedFrame.stVFrame.u32Stride[1];
 
-        // Map resized frame memory - use full stride size
+        // Map resized frame memory
         size_t y_size = stride_y * height;
         size_t uv_size = stride_uv * height / 2;
         size_t image_size = y_size + uv_size;
 
-        CVI_VOID* vir_addr = CVI_SYS_Mmap(stResizedFrame.stVFrame.u64PhyAddr[0], image_size);
+        CVI_VOID* vir_addr = CVI_SYS_MmapCache(stResizedFrame.stVFrame.u64PhyAddr[0], image_size);
         CVI_SYS_IonInvalidateCache(stResizedFrame.stVFrame.u64PhyAddr[0], vir_addr, image_size);
 
-        // Always copy to contiguous memory for fast cvtColor
-        // Even if stride==width, VPSS output may not be cache-friendly
         cv::Mat yuv_continuous(height * 3 / 2, width, CV_8UC1);
 
         if (stride_y == width && stride_uv == width) {
-            // Fast memcpy for entire buffer
             memcpy(yuv_continuous.data, vir_addr, width * height * 3 / 2);
         } else {
-            // Copy Y plane line by line
             for (int i = 0; i < height; i++) {
                 memcpy(yuv_continuous.data + i * width, (uint8_t*)vir_addr + i * stride_y, width);
             }
-            // Copy UV plane line by line
             for (int i = 0; i < height / 2; i++) {
-                memcpy(yuv_continuous.data + height * width + i * width, (uint8_t*)vir_addr + y_size + i * stride_uv,
-                       width);
+                memcpy(yuv_continuous.data + height * width + i * width, (uint8_t*)vir_addr + y_size + i * stride_uv, width);
             }
         }
 
@@ -263,21 +308,12 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
         gettimeofday(&t2, NULL);
         cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-        printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (stride=%d)\n", get_frame_us / 1000.0,
-               resize_us / 1000.0, cvt_us / 1000.0, stride_y);
-
-        // Flip image 180 degrees
-        gettimeofday(&t1, NULL);
-        cv::flip(bgr_image, bgr_image, -1);
-        gettimeofday(&t2, NULL);
-        flip_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)\n", 
+               get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0, stride_y);
 
         CVI_SYS_Munmap(vir_addr, image_size);
         CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);
         CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
-
-        // print reduced log
-        // printf("[VI-DETAIL] Flip: %.1fms (VPSS mode)\n", flip_us/1000.0);
 
         return CVI_SUCCESS;
 #else
