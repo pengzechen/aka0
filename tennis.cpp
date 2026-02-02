@@ -373,22 +373,6 @@ static int sys_vi_init(void) {
         return s32Ret;
     }
 
-    // Configure VI channel output to smaller resolution for better performance
-    VI_CHN_ATTR_S stChnAttr;
-    // Try to set channel 0 to 640x640
-    s32Ret = CVI_VI_GetChnAttr(0, 0, &stChnAttr);
-    if (s32Ret == CVI_SUCCESS) {
-        SAMPLE_PRT("Original VI output: %dx%d\n", stChnAttr.stSize.u32Width, stChnAttr.stSize.u32Height);
-        stChnAttr.stSize.u32Width = 640;
-        stChnAttr.stSize.u32Height = 640;
-        s32Ret = CVI_VI_SetChnAttr(0, 0, &stChnAttr);
-        if (s32Ret == CVI_SUCCESS) {
-            SAMPLE_PRT("VI output resized to: 640x640 for better performance\n");
-        } else {
-            SAMPLE_PRT("Failed to resize VI output: 0x%x (will use original size)\n", s32Ret);
-        }
-    }
-
     return CVI_SUCCESS;
 }
 
@@ -401,8 +385,14 @@ static void sys_vi_deinit(void) {
 // Get YUV frame from VI and convert to BGR
 static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
     VIDEO_FRAME_INFO_S stVideoFrame;
+    struct timeval t1, t2;
+    long get_frame_us, mmap_us, resize_us, cvt_us, flip_us, munmap_us, release_us;
 
+    gettimeofday(&t1, NULL);
     if (CVI_VI_GetChnFrame(0, chn, &stVideoFrame, 3000) == 0) {
+        gettimeofday(&t2, NULL);
+        get_frame_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        
         size_t image_size = stVideoFrame.stVFrame.u32Length[0] + stVideoFrame.stVFrame.u32Length[1] +
                             stVideoFrame.stVFrame.u32Length[2];
         CVI_VOID* vir_addr;
@@ -411,15 +401,12 @@ static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
         int width = stVideoFrame.stVFrame.u32Width;
         int height = stVideoFrame.stVFrame.u32Height;
         
-        printf("[VI] Frame info: %dx%d, PixelFormat: %d, Length: Y=%u, U=%u, V=%u\n", 
-               width, height, stVideoFrame.stVFrame.enPixelFormat,
-               stVideoFrame.stVFrame.u32Length[0],
-               stVideoFrame.stVFrame.u32Length[1],
-               stVideoFrame.stVFrame.u32Length[2]);
-
         // Map physical memory to virtual address
+        gettimeofday(&t1, NULL);
         vir_addr = CVI_SYS_Mmap(stVideoFrame.stVFrame.u64PhyAddr[0], image_size);
         CVI_SYS_IonInvalidateCache(stVideoFrame.stVFrame.u64PhyAddr[0], vir_addr, image_size);
+        gettimeofday(&t2, NULL);
+        mmap_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
         // Map virtual addresses for each plane
         plane_offset = 0;
@@ -433,31 +420,59 @@ static int vi_get_frame_as_bgr(CVI_U8 chn, cv::Mat& bgr_image) {
         // Check pixel format and convert accordingly
         // Format 19 = PIXEL_FORMAT_NV21 (YVU420 semi-planar)
         // Format 18 = PIXEL_FORMAT_NV12 (YUV420 semi-planar)
-        // Format 13 = PIXEL_FORMAT_YUV_PLANAR_420 (I420)
+        // Optimization: Use INTER_NEAREST for faster resize (quality loss is acceptable for detection)
+        cv::Mat yuv_small;
+        gettimeofday(&t1, NULL);
         if (stVideoFrame.stVFrame.enPixelFormat == 19) { // NV21
             // NV21: Y plane + VU interleaved plane
             cv::Mat yuv_nv21(height * 3 / 2, width, CV_8UC1, vir_addr);
-            cv::cvtColor(yuv_nv21, bgr_image, cv::COLOR_YUV2BGR_NV21);
-            printf("[VI] Got frame: %dx%d, format: NV21->BGR\n", width, height);
+            // Use INTER_NEAREST - 3x faster than INTER_LINEAR for resize
+            cv::resize(yuv_nv21, yuv_small, cv::Size(640, 640 * 3 / 2), 0, 0, cv::INTER_NEAREST);
         } else if (stVideoFrame.stVFrame.enPixelFormat == 18) { // NV12
             cv::Mat yuv_nv12(height * 3 / 2, width, CV_8UC1, vir_addr);
-            cv::cvtColor(yuv_nv12, bgr_image, cv::COLOR_YUV2BGR_NV12);
-            printf("[VI] Got frame: %dx%d, format: NV12->BGR\n", width, height);
+            cv::resize(yuv_nv12, yuv_small, cv::Size(640, 640 * 3 / 2), 0, 0, cv::INTER_NEAREST);
         } else { // Default to I420
             cv::Mat yuv_i420(height * 3 / 2, width, CV_8UC1, vir_addr);
-            cv::cvtColor(yuv_i420, bgr_image, cv::COLOR_YUV2BGR_I420);
-            printf("[VI] Got frame: %dx%d, format: I420->BGR\n", width, height);
+            cv::resize(yuv_i420, yuv_small, cv::Size(640, 640 * 3 / 2), 0, 0, cv::INTER_NEAREST);
         }
+        gettimeofday(&t2, NULL);
+        resize_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        
+        gettimeofday(&t1, NULL);
+        if (stVideoFrame.stVFrame.enPixelFormat == 19) { // NV21
+            cv::cvtColor(yuv_small, bgr_image, cv::COLOR_YUV2BGR_NV21);
+        } else if (stVideoFrame.stVFrame.enPixelFormat == 18) { // NV12
+            cv::cvtColor(yuv_small, bgr_image, cv::COLOR_YUV2BGR_NV12);
+        } else { // Default to I420
+            cv::cvtColor(yuv_small, bgr_image, cv::COLOR_YUV2BGR_I420);
+        }
+        gettimeofday(&t2, NULL);
+        cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        
+        printf("[VI-DETAIL] GetFrame: %.1fms, Mmap: %.1fms, Resize: %.1fms, Cvt: %.1fms\n",
+               get_frame_us/1000.0, mmap_us/1000.0, resize_us/1000.0, cvt_us/1000.0);
         
         // Flip image 180 degrees (camera is upside down)
+        gettimeofday(&t1, NULL);
         cv::flip(bgr_image, bgr_image, -1);
+        gettimeofday(&t2, NULL);
+        flip_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
+        gettimeofday(&t1, NULL);
         CVI_SYS_Munmap(vir_addr, image_size);
+        gettimeofday(&t2, NULL);
+        munmap_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
+        gettimeofday(&t1, NULL);
         if (CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame) != 0) {
             CVI_TRACE_LOG(CVI_DBG_ERR, "CVI_VI_ReleaseChnFrame NG\n");
             return CVI_FAILURE;
         }
+        gettimeofday(&t2, NULL);
+        release_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
+        
+        printf("[VI-DETAIL] Flip: %.1fms, Munmap: %.1fms, Release: %.1fms\n",
+               flip_us/1000.0, munmap_us/1000.0, release_us/1000.0);
 
         return CVI_SUCCESS;
     }
@@ -572,24 +587,10 @@ int main(int argc, char** argv) {
         gettimeofday(&t2, NULL);
         long read_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-        // Keep original for display later (will clone after resize)
-        cv::Mat original_bgr = image.clone();
-
-        // resize & letterbox
+        // Image is already 640x640 from vi_get_frame_as_bgr, no need to resize again
         gettimeofday(&t1, NULL);
-        int ih = image.rows;
-        int iw = image.cols;
-        int oh = height;
-        int ow = width;
-        double resize_scale = std::min((double)oh / ih, (double)ow / iw);
-        int nh = (int)(ih * resize_scale);
-        int nw = (int)(iw * resize_scale);
-        cv::resize(image, image, cv::Size(nw, nh));
-        int top = (oh - nh) / 2;
-        int bottom = (oh - nh) - top;
-        int left = (ow - nw) / 2;
-        int right = (ow - nw) - left;
-        cv::copyMakeBorder(image, image, top, bottom, left, right, cv::BORDER_CONSTANT, cv::Scalar::all(0));
+        
+        // Convert BGR to RGB
         cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
 
         // Packed2Planar
@@ -666,6 +667,13 @@ int main(int argc, char** argv) {
             }
 #endif
 
+
+        } else {
+            printf("[DETECT] No ball detected\n");
+            printf("[MOTOR] STANDBY\n");
+            motor.standby();
+        }
+        
 #if ENABLE_SAVE_IMAGE
             // save picture with detection results (only when ball detected)
             char output_path[256];
@@ -674,12 +682,6 @@ int main(int argc, char** argv) {
             cv::imwrite(output_path, cloned);
             printf("[SAVE] %s\n", output_path);
 #endif
-        } else {
-            printf("[DETECT] No ball detected\n");
-            printf("[MOTOR] STANDBY\n");
-            motor.standby();
-        }
-
         // 计算帧率
         gettimeofday(&end_time, NULL);
         long frame_time_us = (end_time.tv_sec - start_time.tv_sec) * 1000000 + (end_time.tv_usec - start_time.tv_usec);
