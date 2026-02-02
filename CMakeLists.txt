@@ -18,6 +18,25 @@ endif()
 include_directories(${OPENCV_PATH}/include)
 link_directories(${OPENCV_PATH}/lib)
 
+# 打印log等级
+
+message(STATUS "Log level set to: ${LOG_LEVEL}")
+if(NOT DEFINED LOG_LEVEL)
+  set(LOG_LEVEL "INFO")
+endif()
+
+if(LOG_LEVEL STREQUAL "DEBUG")
+  add_definitions(-DCURRENT_LOG_LEVEL=0)
+elseif(LOG_LEVEL STREQUAL "INFO")
+  add_definitions(-DCURRENT_LOG_LEVEL=1)
+elseif(LOG_LEVEL STREQUAL "WARN")
+  add_definitions(-DCURRENT_LOG_LEVEL=2)
+elseif(LOG_LEVEL STREQUAL "ERROR")
+  add_definitions(-DCURRENT_LOG_LEVEL=3)
+else()
+  add_definitions(-DCURRENT_LOG_LEVEL=1) # Default to INFO
+endif()
+
 # Add sensor include path
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sensor/include/isp/sg200x)
@@ -38,7 +57,7 @@ endif()
 
 set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 
-add_executable(tennis tennis.cpp motor.cpp)
+add_executable(tennis tennis.cpp motor.cpp vi_capture.cpp)
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}

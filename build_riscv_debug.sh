@@ -27,7 +27,8 @@ cmake .. \
     -DCMAKE_CXX_FLAGS="-O2 -mcpu=c906fdv -march=rv64gcv0p7_zfh_xthead -mabi=lp64d" \
     -DCMAKE_CROSSCOMPILING=ON \
     -DTPU_SDK_PATH=${TPU_SDK_PATH} \
-    -DOPENCV_PATH=${OPENCV_PATH}
+    -DOPENCV_PATH=${OPENCV_PATH} \
+    -DLOG_LEVEL=debug
 
 # 编译
 make -j$(nproc)
