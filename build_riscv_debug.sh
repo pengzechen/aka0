@@ -1,15 +1,24 @@
 #!/bin/bash
+set -e
 
 # 设置交叉编译工具链
 export CC=riscv64-unknown-linux-musl-gcc
 export CXX=riscv64-unknown-linux-musl-g++
 
-# 设置SDK路径，请根据实际情况修改
-TPU_SDK_PATH=${TPU_SDK_PATH:-"/home/ajax/Proj/OS/sg2002/cvitek_tpu_sdk"}
-OPENCV_PATH=${OPENCV_PATH:-"/home/ajax/Proj/OS/sg2002/cvitek_tpu_sdk/opencv"}
+# SDK路径: 环境变量 > 自动搜索 > Docker默认 > 本地默认
+if [ -z "$TPU_SDK_PATH" ]; then
+    TPU_SDK_PATH=$(find /opt /home -maxdepth 4 -name "cviruntime.h" 2>/dev/null | head -1)
+    TPU_SDK_PATH=${TPU_SDK_PATH:+$(dirname "$(dirname "$TPU_SDK_PATH")")}
+    : ${TPU_SDK_PATH:="/opt/cvitek_tpu_sdk"}
+fi
+if [ -z "$OPENCV_PATH" ]; then
+    OPENCV_PATH=$(find "${TPU_SDK_PATH}" -maxdepth 3 -name "opencv.hpp" 2>/dev/null | head -1)
+    OPENCV_PATH=${OPENCV_PATH:+$(dirname "$(dirname "$(dirname "$OPENCV_PATH")")")}
+    : ${OPENCV_PATH:="${TPU_SDK_PATH}/opencv"}
+fi
 
 echo "Using TPU_SDK_PATH: $TPU_SDK_PATH"
-echo "Using OPENCV_PATH: $OPENCV_PATH"
+echo "Using OPENCV_PATH:  $OPENCV_PATH"
 
 # 清理之前的构建
 rm -rf build_riscv_debug
@@ -17,9 +26,15 @@ mkdir -p build_riscv_debug
 cd build_riscv_debug
 
 # 配置cmake
-# LOG_LEVEL可以通过环境变量设置，默认为debug
-# 使用方法: LOG_LEVEL=warn ./build_riscv_debug.sh
 LOG_LEVEL=${LOG_LEVEL:-debug}
+
+ESP32_FLAG=""
+if [ "${USE_ESP32}" = "1" ]; then
+    ESP32_FLAG="-DUSE_ESP32_CAMERA=ON"
+    echo "Camera: ESP32-CAM (ioctl mode)"
+else
+    echo "Camera: VI + VPSS (hardware mode)"
+fi
 
 cmake .. \
     -DCMAKE_BUILD_TYPE=Debug \
@@ -33,10 +48,15 @@ cmake .. \
     -DCMAKE_CROSSCOMPILING=ON \
     -DTPU_SDK_PATH=${TPU_SDK_PATH} \
     -DOPENCV_PATH=${OPENCV_PATH} \
-    -DLOG_LEVEL=${LOG_LEVEL}
+    -DLOG_LEVEL=${LOG_LEVEL} \
+    ${ESP32_FLAG}
 
-# 编译
 make -j$(nproc)
 
-echo "Debug version compiled successfully!"
-echo "Executable: $(pwd)/tennis"
+echo ""
+echo "=== Build Summary ==="
+for bin in tennis test_arm test_motor test_capture_detect test_img_detect camera_test; do
+    if [ -f "$bin" ]; then
+        echo "  $bin  $(file $bin | sed 's/.*: //')"
+    fi
+done

@@ -62,22 +62,40 @@ endif()
 
 set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 
+# Camera selection: USE_ESP32_CAMERA=ON uses ESP32-CAM via ioctl, OFF uses VI+VPSS
+option(USE_ESP32_CAMERA "Use ESP32-CAM via /dev/cvi-camera ioctl instead of VI" OFF)
+if(USE_ESP32_CAMERA)
+  add_definitions(-DUSE_ESP32_CAMERA=1)
+  message(STATUS "Camera: ESP32-CAM (ioctl mode)")
+else()
+  message(STATUS "Camera: VI + VPSS (hardware mode)")
+endif()
+
 # Author: Zhihang Shao <dio_ro@outlook.com>
 # Source: aka0-ref commit 755a885
 # 添加机械臂支持
 # Author: Zhihang Shao <dio_ro@outlook.com>
 # Source: aka0-ref commits 64f8dab, 7b7011d
 # 添加通用检测模块支持
-add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp detect.cpp)
-target_link_libraries(tennis
-    ${CVI_LIBS}
-    ${OPENCV_LIBS}
-    -Wl,--start-group
-    sample isp isp_algo ae awb af
-    vpu cvi_ispd2 cvi_bin_isp cvi_bin
-    sns_full sys ini json-c
-    -Wl,--end-group
-    ${EXTRA_LIBS})
+
+if(USE_ESP32_CAMERA)
+  add_executable(tennis tennis.cpp motor.cpp arm.cpp esp32_capture.cpp detect.cpp)
+  target_link_libraries(tennis
+      ${CVI_LIBS}
+      ${OPENCV_LIBS}
+      ${EXTRA_LIBS})
+else()
+  add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp detect.cpp)
+  target_link_libraries(tennis
+      ${CVI_LIBS}
+      ${OPENCV_LIBS}
+      -Wl,--start-group
+      sample isp isp_algo ae awb af
+      vpu cvi_ispd2 cvi_bin_isp cvi_bin
+      sns_full sys ini json-c
+      -Wl,--end-group
+      ${EXTRA_LIBS})
+endif()
 install(TARGETS tennis DESTINATION samples_extra/bin)
 
 # =====================================================

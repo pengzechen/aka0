@@ -13,17 +13,22 @@
 
 // Author: Zhihang Shao <dio_ro@outlook.com>
 // Source: aka0-ref commit d4fbdad
-// 舵机角度最终校准
-const float Arm::ID2_ANGLE_OPEN = 210.0f;
-const float Arm::ID2_ANGLE_CLOSE = 150.0f;
+// 舵机角度实测校准
+// 初始:    0=200 1=200 2=175(开)
+// 伸下:    0=240 1=175 2=175(开)
+// 夹紧:    0=240 1=175 2=135(闭)
+// 展示:    0=165 1=180 2=135(闭)
+// 放球:    0=165 1=180 2=175(开)
+const float Arm::ID2_ANGLE_OPEN = 175.0f;
+const float Arm::ID2_ANGLE_CLOSE = 135.0f;
 const float Arm::ANGLE_MAX = 270.0f;
 
 const float Arm::SERVO0_READY = 200.0f;
 const float Arm::SERVO1_READY = 200.0f;
-const float Arm::SERVO0_GRAB = 250.0f;
-const float Arm::SERVO1_GRAB = 185.0f;
-const float Arm::SERVO0_LIFT = 150.0f;
-const float Arm::SERVO1_LIFT = 185.0f;
+const float Arm::SERVO0_GRAB = 240.0f;
+const float Arm::SERVO1_GRAB = 175.0f;
+const float Arm::SERVO0_LIFT = 165.0f;
+const float Arm::SERVO1_LIFT = 180.0f;
 
 Arm::Arm(const std::string& port, int baudrate) : fd_(-1) {
     open_serial(port, baudrate);
@@ -132,15 +137,9 @@ void Arm::restore_torque(int servo_id) {
     LOGD("[ARM] servo %d torque restored", servo_id);
 }
 
-// Grab sequence - 实测校准角度
-// Author: Zhihang Shao <dio_ro@outlook.com>
-// Source: aka0-ref commits 7b7011d, 9c69f3f, d4fbdad
-// 初始:    0=200 1=200 2=210(开)
-// 伸下:    0=250 1=185 2=210(开)
-// 夹紧:    0=250 1=185 2=150(闭)
-// 抬起展示: 0=200 1=180 2=150(闭)
-// 回位:    0=200 1=200 2=150(闭)
-// 松开:    0=200 1=200 2=210(开)
+// Grab sequence
+// 初始(200,200,175开) → 伸下(240,175,175开) → 夹紧(240,175,135闭)
+// → 展示(165,180,135闭) → 放球(165,180,175开) → 回初始(200,200,175开)
 void Arm::grab() {
     LOGI("[ARM] Grab sequence start");
 
@@ -157,14 +156,16 @@ void Arm::grab() {
     // 3. 抬起展示
     set_angle(0, SERVO0_LIFT);
     set_angle(1, SERVO1_LIFT);
-    // servo2 保持闭合
     usleep(1000 * 1000);
 
-    // 4. 回到初始位置，爪子仍闭合
+    // 4. 松开球
+    set_angle(2, ID2_ANGLE_OPEN);
+    usleep(800 * 1000);
+
+    // 5. 回到初始
     set_angle(0, SERVO0_READY);
     set_angle(1, SERVO1_READY);
-    // servo2 保持闭合
-    usleep(1000 * 1000);
+    usleep(800 * 1000);
 
     LOGI("[ARM] Grab sequence done");
 }
@@ -178,8 +179,8 @@ void Arm::release_pos() {
 
 void Arm::release() {
     LOGI("[ARM] Releasing gripper");
-    set_angle(0, SERVO0_READY);
-    set_angle(1, SERVO1_READY);
+    set_angle(0, SERVO0_LIFT);
+    set_angle(1, SERVO1_LIFT);
     set_angle(2, ID2_ANGLE_OPEN);
 }
 
